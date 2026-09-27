@@ -6,13 +6,7 @@ from urllib.parse import urlparse
 import yt_dlp
 
 
-def get_content_id(url: str) -> tuple[str, str]:
-    """
-    Возвращает (source, content_id).
-
-    Сначала пытаемся получить ID через yt-dlp.
-    Если это невозможно, используем нормализованный URL.
-    """
+def get_content_id(url: str) -> str:
     try:
         with yt_dlp.YoutubeDL(
             {
@@ -33,7 +27,7 @@ def get_content_id(url: str) -> tuple[str, str]:
         content_id = data.get("id")
 
         if content_id:
-            return source.lower(), str(content_id)
+            return f"{source.lower()}_{content_id}"
 
     except Exception:
         pass
@@ -44,6 +38,4 @@ def get_content_id(url: str) -> tuple[str, str]:
     if parsed.query:
         normalized += f"?{parsed.query}"
 
-    content_id = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-    return parsed.netloc.lower(), content_id
+    return f"{parsed.netloc.lower()}_{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
