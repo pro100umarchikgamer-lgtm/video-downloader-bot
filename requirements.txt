@@ -1,5 +1,7 @@
+# aiogram 3.20+ provides Bot API server customization and Python 3.12 support.
 aiogram>=3.20,<4
-yt-dlp[default]
-aiosqlite>=0.20,<1
-python-dotenv>=1.0,<2
+# Keep yt-dlp current within deployments: extractor fixes age much faster than
+# application releases. The Docker build records the installed version.
+yt-dlp[default]>=2025.9.26
+python-dotenv>=1.1,<2
 aiohttp>=3.10,<4
