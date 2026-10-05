@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, ReplyParameters
 
 from app.database import get_connection
 from app.runtime_config import RuntimeConfig
@@ -116,7 +116,7 @@ class VideoNoteService:
             conn.commit()
         return changed
 
-    async def create_and_send(self, bot: Bot, token: str) -> str:
+    async def create_and_send(self, bot: Bot, token: str, *, reply_to_message_id: int | None = None) -> str:
         row = self.get_delivery(token)
         if row is None:
             return "missing"
@@ -144,12 +144,19 @@ class VideoNoteService:
 
                 output = workdir / "note.mp4"
                 await self._convert(source, output)
+                kwargs = {}
+                if reply_to_message_id is not None:
+                    kwargs["reply_parameters"] = ReplyParameters(
+                        message_id=reply_to_message_id,
+                        allow_sending_without_reply=True,
+                    )
                 message = await telegram_retry(
                     lambda: bot.send_video_note(
                         row["chat_id"],
                         video_note=FSInputFile(output),
                         duration=min(60, max(1, int(float(row["duration"] or 1)))),
                         length=VIDEO_NOTE_SIZE,
+                        **kwargs,
                     )
                 )
                 file_id = message.video_note.file_id if message.video_note else None

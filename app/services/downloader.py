@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
+import subprocess
 import shutil
 import tempfile
 import time
@@ -45,7 +47,8 @@ def build_format_selector(info: dict, quality: int) -> str:
         f"bestvideo[{dimension}>={quality}][{dimension}<={upper}][vcodec^=avc1]+bestaudio/"
         f"bestvideo[{dimension}>={quality}][{dimension}<={upper}]+bestaudio/"
         f"bestvideo[{dimension}<={upper}]+bestaudio/"
-        f"best[{dimension}<={upper}]"
+        f"best[{dimension}<={upper}]/"
+        "best"
     )
 
 
@@ -55,6 +58,8 @@ def classify_extractor_error(exc: Exception) -> UserError:
         return UserError("unsupported", str(exc), False)
     if any(part in text for part in ("private video", "login required", "sign in", "cookies", "members-only", "age-restricted")):
         return UserError("private_media", str(exc), False)
+    if "requested format is not available" in text:
+        return UserError("quality_unavailable", str(exc), False)
     if any(part in text for part in ("video unavailable", "not available", "removed", "deleted")):
         return UserError("unavailable", str(exc), False)
     if any(part in text for part in ("file is larger", "max-filesize", "too large")):
@@ -174,6 +179,26 @@ class Downloader:
                 raise UserError("unsafe_link", "all media endpoints are private", False)
         return info
 
+    @staticmethod
+    def _probe_duration(path: Path) -> float | None:
+        try:
+            completed = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "json", str(path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            value = json.loads(completed.stdout).get("format", {}).get("duration")
+            duration = float(value) if value is not None else None
+            return duration if duration and duration > 0 else None
+        except Exception:
+            logger.warning("Could not probe media duration for %s", path, exc_info=True)
+            return None
+
     async def download(
         self,
         url: str,
@@ -271,12 +296,18 @@ class Downloader:
             filesize = video_path.stat().st_size
             if filesize > max_filesize:
                 raise UserError("too_large", f"result is {filesize} bytes", False)
+            try:
+                normalized_duration = float(duration) if duration is not None else None
+            except (TypeError, ValueError):
+                normalized_duration = None
+            if normalized_duration is None or normalized_duration <= 0:
+                normalized_duration = self._probe_duration(video_path)
             return DownloadResult(
                 path=str(video_path),
                 title=title,
                 quality=quality,
                 filesize=filesize,
-                duration=float(duration) if duration is not None else None,
+                duration=normalized_duration,
                 source=source,
                 elapsed_ms=round(((media_finished or time.monotonic()) - started) * 1000),
                 processing_ms=round(((postprocess_finished or postprocess_started or 0) - (postprocess_started or postprocess_finished or 0)) * 1000) if postprocess_started else 0,

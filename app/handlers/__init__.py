@@ -34,5 +34,5 @@ from app.handlers import callbacks, links, settings, start  # noqa: E402
 
 user_router.include_router(start.router)
 user_router.include_router(settings.router)
-user_router.include_router(callbacks.router)
 user_router.include_router(links.router)
+user_router.include_router(callbacks.router)

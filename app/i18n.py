@@ -155,6 +155,57 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 }
 
 
+_EXTRA_TRANSLATIONS = {
+    "ru": {
+        "cmd_download": "Скачать видео",
+        "cmd_circle": "Сделать кружочек",
+        "quality_request": "Выберите качество для этой загрузки. Рекомендуемый стандарт — {default}:",
+        "command_usage_download": "Использование: /dl 1080 <ссылка>. Также: 360, 480, 720, 1440, 2160, 4k, auto. Команду можно отправить ответом на сообщение со ссылкой.",
+        "command_usage_circle": "Использование: /circle <ссылка> или отправьте /circle ответом на сообщение со ссылкой.",
+        "video_note_too_long": "Кружочек можно сделать только из видео длительностью до 60 секунд.",
+        "downloaded_via": "✅ Скачано при помощи: @{username}",
+    },
+    "kk": {
+        "cmd_download": "Видеоны жүктеу",
+        "cmd_circle": "Дөңгелек видео жасау",
+        "quality_request": "Осы жүктеу үшін сапаны таңдаңыз. Ұсынылатын стандарт — {default}:",
+        "command_usage_download": "Қолдану: /dl 1080 <сілтеме>. 360, 480, 720, 1440, 2160, 4k, auto да қолжетімді.",
+        "command_usage_circle": "Қолдану: /circle <сілтеме> немесе сілтемесі бар хабарламаға /circle деп жауап беріңіз.",
+        "video_note_too_long": "Дөңгелек видео тек 60 секундқа дейінгі видеодан жасалады.",
+        "downloaded_via": "✅ @{username} көмегімен жүктелді",
+    },
+    "uz_latn": {
+        "cmd_download": "Videoni yuklash",
+        "cmd_circle": "Dumaloq video qilish",
+        "quality_request": "Ushbu yuklash uchun sifatni tanlang. Tavsiya etilgan standart — {default}:",
+        "command_usage_download": "Foydalanish: /dl 1080 <havola>. 360, 480, 720, 1440, 2160, 4k, auto ham mavjud.",
+        "command_usage_circle": "Foydalanish: /circle <havola> yoki havolali xabarga /circle deb javob bering.",
+        "video_note_too_long": "Dumaloq video faqat 60 soniyagacha bo‘lgan videodan yaratiladi.",
+        "downloaded_via": "✅ @{username} yordamida yuklandi",
+    },
+    "uz_cyrl": {
+        "cmd_download": "Видеони юклаш",
+        "cmd_circle": "Думалоқ видео қилиш",
+        "quality_request": "Ушбу юклаш учун сифатни танланг. Тавсия этилган стандарт — {default}:",
+        "command_usage_download": "Фойдаланиш: /dl 1080 <ҳавола>. 360, 480, 720, 1440, 2160, 4k, auto ҳам мавжуд.",
+        "command_usage_circle": "Фойдаланиш: /circle <ҳавола> ёки ҳаволали хабарга /circle деб жавоб беринг.",
+        "video_note_too_long": "Думалоқ видео фақат 60 сониягача бўлган видеодан яратилади.",
+        "downloaded_via": "✅ @{username} ёрдамида юкланди",
+    },
+    "en": {
+        "cmd_download": "Download video",
+        "cmd_circle": "Make video note",
+        "quality_request": "Choose quality for this download. Recommended default: {default}:",
+        "command_usage_download": "Usage: /dl 1080 <link>. Also supported: 360, 480, 720, 1440, 2160, 4k, auto. You can also reply to a link message.",
+        "command_usage_circle": "Usage: /circle <link>, or reply /circle to a message containing a link.",
+        "video_note_too_long": "A video note can only be made from a video up to 60 seconds long.",
+        "downloaded_via": "✅ Downloaded with: @{username}",
+    },
+}
+for _extra_locale, _extra_values in _EXTRA_TRANSLATIONS.items():
+    TRANSLATIONS.setdefault(_extra_locale, {}).update(_extra_values)
+
+
 def normalize_locale(language_code: str | None) -> str:
     if not language_code:
         return DEFAULT_LOCALE

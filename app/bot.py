@@ -81,6 +81,8 @@ async def register_commands(bot: Bot) -> None:
     default = [
         BotCommand(command="start", description=t("ru", "cmd_start")),
         BotCommand(command="settings", description=t("ru", "cmd_settings")),
+        BotCommand(command="dl", description=t("ru", "cmd_download")),
+        BotCommand(command="circle", description=t("ru", "cmd_circle")),
     ]
     await set_safely(default, BotCommandScopeDefault())
     await set_safely(default, BotCommandScopeAllPrivateChats())
@@ -90,6 +92,8 @@ async def register_commands(bot: Bot) -> None:
         commands = [
             BotCommand(command="start", description=t(locale, "cmd_start")),
             BotCommand(command="settings", description=t(locale, "cmd_settings")),
+            BotCommand(command="dl", description=t(locale, "cmd_download")),
+            BotCommand(command="circle", description=t(locale, "cmd_circle")),
         ]
         await set_safely(commands, BotCommandScopeAllPrivateChats(), language_code)
     admin_ids = set(bootstrap_owner_ids()) | {row["telegram_id"] for row in list_admins() if row["enabled"]}

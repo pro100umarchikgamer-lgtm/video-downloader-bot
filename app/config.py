@@ -63,7 +63,7 @@ class BootstrapConfig:
     def transport_limit_mb(self) -> int:
         # Cloud Bot API accepts uploads up to 50 MB; Local Bot API up to
         # 2,000 MB. Headroom avoids claiming the exact protocol boundary.
-        return 1900 if self.telegram_api_is_local else 49
+        return 1950 if self.telegram_api_is_local else 49
 
 
 def load_bootstrap_config(*, require_token: bool = True) -> BootstrapConfig:

@@ -5,3 +5,4 @@ aiogram>=3.20,<4
 yt-dlp[default]>=2025.9.26
 python-dotenv>=1.1,<2
 aiohttp>=3.10,<4
+curl_cffi>=0.10,<0.17

@@ -28,7 +28,7 @@ services:
     volumes:
       - ./data/telegram-bot-api:/var/lib/telegram-bot-api
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081'"]
+      test: ["CMD-SHELL", "kill -0 1"]
       interval: 20s
       timeout: 5s
       retries: 5

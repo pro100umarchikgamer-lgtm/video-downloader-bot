@@ -7,11 +7,11 @@ import re
 import shutil
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, ReplyParameters
 
 from admin.buttons.service import build_video_keyboard
 from app.context import app_context
@@ -35,12 +35,23 @@ from app.services.telegram import telegram_retry
 from app.services.video_note import is_video_note_eligible
 
 logger = logging.getLogger(__name__)
+_bot_username: str | None = None
 
 
 @dataclass(slots=True)
 class PreparedMedia:
     result: DownloadResult
-    cached_file_id: str | None
+    telegram_file_id: str | None = None
+    first_upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    cache_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    cache_attempted: bool = False
+
+
+@dataclass(slots=True)
+class CacheDeliveryOutcome:
+    delivered: bool
+    had_entries: bool
+    temporary_failure: bool
 
 
 inflight = InflightCoordinator[PreparedMedia]()
@@ -50,6 +61,33 @@ def _clean_title(value: str | None) -> str:
     title = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value or "Video")
     title = re.sub(r"\s+", " ", title).strip()
     return (title or "Video")[:900]
+
+
+async def _username(bot: Bot) -> str:
+    global _bot_username
+    if _bot_username is None:
+        me = await bot.get_me()
+        _bot_username = me.username or ""
+    return _bot_username
+
+
+async def _video_caption(bot: Bot, title: str | None, locale: str) -> str:
+    clean = _clean_title(title)
+    username = await _username(bot)
+    if not username:
+        return clean
+    suffix = t(locale, "downloaded_via", username=username)
+    max_title = max(1, 1024 - len(suffix) - 2)
+    return f"{clean[:max_title]}\n\n{suffix}"
+
+
+def _reply_parameters(item: QueueItem) -> ReplyParameters | None:
+    if item.request_message_id is None:
+        return None
+    return ReplyParameters(
+        message_id=item.request_message_id,
+        allow_sending_without_reply=True,
+    )
 
 
 async def _safe_edit(bot: Bot, item: QueueItem, message, text: str, reply_markup=None) -> None:
@@ -93,10 +131,18 @@ def _check_disk(estimated_size: int | None, max_size: int) -> None:
         raise UserError("disk_pressure", "insufficient temporary disk space", True)
 
 
-async def _deliver_cached(bot: Bot, item: QueueItem, info: dict, content_id: str, quality: int, status) -> bool:
+async def _deliver_cached(
+    bot: Bot,
+    item: QueueItem,
+    info: dict,
+    content_id: str,
+    quality: int,
+    status,
+) -> CacheDeliveryOutcome:
     context = app_context()
     entries = context.storage.cache_entries(content_id, quality)
     saw_temporary = False
+    caption = await _video_caption(bot, info.get("title") or (entries[0]["title"] if entries else None), item.locale)
     for entry in entries:
         if item.cancel_event.is_set():
             raise DownloadCancelled()
@@ -114,13 +160,18 @@ async def _deliver_cached(bot: Bot, item: QueueItem, info: dict, content_id: str
         await _safe_edit(bot, item, status, t(item.locale, "sending"), reply_markup=cancel_keyboard(item.locale, item.job_id))
         started = time.monotonic()
         try:
+            kwargs = {}
+            reply_parameters = _reply_parameters(item)
+            if reply_parameters is not None:
+                kwargs["reply_parameters"] = reply_parameters
             await telegram_retry(
-                lambda entry=entry: bot.send_video(
+                lambda entry=entry, kwargs=kwargs: bot.send_video(
                     item.chat_id,
                     video=entry["telegram_file_id"],
-                    caption=_clean_title(info.get("title") or entry["title"]),
+                    caption=caption,
                     supports_streaming=True,
                     reply_markup=keyboard,
+                    **kwargs,
                 )
             )
             context.storage.touch_entry(entry["id"])
@@ -131,7 +182,7 @@ async def _deliver_cached(bot: Bot, item: QueueItem, info: dict, content_id: str
                 upload_ms=round((time.monotonic() - started) * 1000),
                 filesize=entry["filesize"],
             )
-            return True
+            return CacheDeliveryOutcome(True, True, False)
         except TelegramForbiddenError:
             raise
         except Exception as exc:
@@ -144,17 +195,79 @@ async def _deliver_cached(bot: Bot, item: QueueItem, info: dict, content_id: str
             saw_temporary = True
             logger.warning("Temporary cached-media delivery failure entry_id=%s: %s", entry["id"], exc)
             continue
+
     if saw_temporary and entries:
-        # A transient failure of a reusable Telegram reference is not proof
-        # that the source or direct-upload path is unavailable.  Keep the
-        # cache rows intact and continue through the normal preparation path.
-        # This keeps cache/storage an optimisation rather than a delivery
-        # dependency.
         logger.info(
-            "Falling back to fresh media preparation after temporary cached-media failure job_id=%s",
+            "Falling back to direct user delivery without rewriting temporary cache job_id=%s",
             item.job_id,
         )
-    return False
+    return CacheDeliveryOutcome(False, bool(entries), saw_temporary)
+
+
+async def _process_circle(
+    bot: Bot,
+    item: QueueItem,
+    info: dict,
+    content_id: str,
+    quality: int,
+    max_bytes: int,
+    status,
+    started_total: float,
+) -> None:
+    context = app_context()
+    metadata_duration = info.get("duration")
+    if metadata_duration is not None and float(metadata_duration) > 60:
+        raise UserError("video_note_too_long", f"duration={metadata_duration}", False)
+
+    await _safe_edit(
+        bot,
+        item,
+        status,
+        t(item.locale, "downloading"),
+        reply_markup=cancel_keyboard(item.locale, item.job_id),
+    )
+    result = await context.downloader.download(
+        item.url,
+        quality,
+        max_bytes,
+        info=info,
+        cancel_event=item.cancel_event,
+    )
+    try:
+        if not is_video_note_eligible(result.duration, bool(context.runtime.get("video_note_enabled"))):
+            raise UserError("video_note_too_long", f"duration={result.duration}", False)
+        token = context.video_notes.create_delivery(
+            job_id=item.job_id,
+            requester_id=item.user_id,
+            chat_id=item.chat_id,
+            content_id=content_id,
+            source_url=item.url,
+            quality=result.quality,
+            telegram_file_id=None,
+            duration=result.duration,
+            source_path=result.path,
+        )
+        if not token:
+            raise UserError("video_note_failed", "video note disabled or ineligible", False)
+        await _safe_edit(bot, item, status, t(item.locale, "video_note_processing"))
+        outcome = await context.video_notes.create_and_send(
+            bot,
+            token,
+            reply_to_message_id=item.request_message_id,
+        )
+        if outcome != "done":
+            raise UserError("video_note_failed", f"result={outcome}", True)
+        update_job(
+            item.job_id,
+            filesize=result.filesize,
+            download_ms=result.elapsed_ms,
+            processing_ms=result.processing_ms,
+            upload_ms=0,
+        )
+        finish_job(item.job_id, "success", total_ms=round((time.monotonic() - started_total) * 1000))
+        await _safe_delete(bot, item, status)
+    finally:
+        context.downloader.cleanup(result.path)
 
 
 async def process_download(bot: Bot, item: QueueItem) -> None:
@@ -166,11 +279,16 @@ async def process_download(bot: Bot, item: QueueItem) -> None:
         if item.cancel_event.is_set():
             raise DownloadCancelled()
         if item.status_message_id is None:
+            kwargs = {}
+            reply_parameters = _reply_parameters(item)
+            if reply_parameters is not None:
+                kwargs["reply_parameters"] = reply_parameters
             status = await telegram_retry(
-                lambda: bot.send_message(
+                lambda kwargs=kwargs: bot.send_message(
                     item.chat_id,
-                    t(item.locale, "processing"),
+                    t(item.locale, "processing" if item.output_mode == "video" else "video_note_processing"),
                     reply_markup=cancel_keyboard(item.locale, item.job_id),
+                    **kwargs,
                 )
             )
         metadata_started = time.monotonic()
@@ -196,12 +314,26 @@ async def process_download(bot: Bot, item: QueueItem) -> None:
             metadata_ms=metadata_ms,
         )
 
-        if await _deliver_cached(bot, item, info, content_id, quality, status):
+        if item.output_mode == "circle":
+            await _process_circle(
+                bot, item, info, content_id, quality, max_bytes, status, started_total
+            )
+            return
+
+        cache_outcome = await _deliver_cached(bot, item, info, content_id, quality, status)
+        if cache_outcome.delivered:
             finish_job(item.job_id, "success", total_ms=round((time.monotonic() - started_total) * 1000))
             await _safe_delete(bot, item, status)
             return
+
         increment_cache_counter(item.user_id, False)
-        await _safe_edit(bot, item, status, t(item.locale, "downloading"), reply_markup=cancel_keyboard(item.locale, item.job_id))
+        await _safe_edit(
+            bot,
+            item,
+            status,
+            t(item.locale, "downloading"),
+            reply_markup=cancel_keyboard(item.locale, item.job_id),
+        )
 
         async def prepare(shared_cancel: asyncio.Event) -> PreparedMedia:
             result = None
@@ -213,13 +345,7 @@ async def process_download(bot: Bot, item: QueueItem) -> None:
                     info=info,
                     cancel_event=shared_cancel,
                 )
-                cached = await context.storage.store(
-                    bot,
-                    result,
-                    content_id=content_id,
-                    original_url=item.url,
-                )
-                return PreparedMedia(result=result, cached_file_id=cached.file_id if cached else None)
+                return PreparedMedia(result=result)
             except Exception:
                 if result is not None:
                     context.downloader.cleanup(result.path)
@@ -234,6 +360,7 @@ async def process_download(bot: Bot, item: QueueItem) -> None:
         ) as media:
             if item.cancel_event.is_set():
                 raise DownloadCancelled()
+
             token = context.video_notes.create_delivery(
                 job_id=item.job_id,
                 requester_id=item.user_id,
@@ -241,59 +368,83 @@ async def process_download(bot: Bot, item: QueueItem) -> None:
                 content_id=content_id,
                 source_url=item.url,
                 quality=media.result.quality,
-                telegram_file_id=media.cached_file_id,
+                telegram_file_id=media.telegram_file_id,
                 duration=media.result.duration,
                 source_path=media.result.path if is_video_note_eligible(media.result.duration) else None,
             )
             keyboard = await build_video_keyboard(bot, locale=item.locale, video_note_token=token)
-            await _safe_edit(bot, item, status, t(item.locale, "sending"), reply_markup=cancel_keyboard(item.locale, item.job_id))
+            caption = await _video_caption(bot, media.result.title, item.locale)
+            await _safe_edit(
+                bot,
+                item,
+                status,
+                t(item.locale, "sending"),
+                reply_markup=cancel_keyboard(item.locale, item.job_id),
+            )
             upload_started = time.monotonic()
+
             async def send(video):
+                kwargs = {}
+                reply_parameters = _reply_parameters(item)
+                if reply_parameters is not None:
+                    kwargs["reply_parameters"] = reply_parameters
                 return await telegram_retry(
-                    lambda: bot.send_video(
+                    lambda kwargs=kwargs: bot.send_video(
                         item.chat_id,
                         video=video,
-                        caption=_clean_title(media.result.title),
+                        caption=caption,
                         supports_streaming=True,
                         reply_markup=keyboard,
+                        **kwargs,
                     )
                 )
 
-            if media.cached_file_id:
+            # User delivery has priority. The first concurrent consumer uploads
+            # the local file; subsequent consumers reuse that resulting file_id.
+            if media.telegram_file_id is None:
+                async with media.first_upload_lock:
+                    if media.telegram_file_id is None:
+                        sent = await send(FSInputFile(media.result.path))
+                        if sent.video:
+                            media.telegram_file_id = sent.video.file_id
+                    else:
+                        sent = await send(media.telegram_file_id)
+            else:
                 try:
-                    sent = await send(media.cached_file_id)
+                    sent = await send(media.telegram_file_id)
                 except TelegramForbiddenError:
                     raise
-                except Exception as exc:
-                    failure = classify_cache_delivery_error(exc)
-                    if failure is CacheReferenceFailure.PERMANENT:
-                        for entry in context.storage.cache_entries(content_id, quality):
-                            if entry["telegram_file_id"] == media.cached_file_id:
-                                context.storage.delete_permanently_stale(entry["id"], reason=str(exc))
-                    logger.warning(
-                        "Fresh storage reference could not be delivered; using direct upload job_id=%s failure=%s",
-                        item.job_id,
-                        failure.value,
-                    )
+                except Exception:
                     sent = await send(FSInputFile(media.result.path))
-            else:
-                sent = await send(FSInputFile(media.result.path))
-            # If storage was unavailable, the direct-delivery file_id is saved
-            # only in the short-lived delivery record, not presented as a cache
-            # channel copy.
-            if token and sent.video and not media.cached_file_id:
-                with suppress(Exception):
-                    from app.database import get_connection
-                    with get_connection() as conn:
-                        conn.execute("UPDATE media_deliveries SET telegram_file_id=? WHERE token=?", (sent.video.file_id, token))
-                        conn.commit()
+                    if sent.video:
+                        media.telegram_file_id = sent.video.file_id
+
+            # Cache is written only AFTER the user has the video. A temporary
+            # failure of an existing cache reference must never create a
+            # duplicate cache copy. Permanently stale rows were deleted above,
+            # so replacing those is safe.
+            should_cache = not cache_outcome.temporary_failure
+            if should_cache and media.telegram_file_id:
+                async with media.cache_lock:
+                    if not media.cache_attempted:
+                        media.cache_attempted = True
+                        await context.storage.store_file_id(
+                            bot,
+                            media.result,
+                            media.telegram_file_id,
+                            content_id=content_id,
+                            original_url=item.url,
+                        )
+
             update_job(
                 item.job_id,
                 filesize=media.result.filesize,
+                duration=media.result.duration,
                 download_ms=media.result.elapsed_ms,
                 processing_ms=media.result.processing_ms,
                 upload_ms=round((time.monotonic() - upload_started) * 1000),
             )
+
         finish_job(item.job_id, "success", total_ms=round((time.monotonic() - started_total) * 1000))
         await _safe_delete(bot, item, status)
     except DownloadCancelled:
@@ -316,6 +467,8 @@ async def process_download(bot: Bot, item: QueueItem) -> None:
         logger.exception("Unexpected download failure job_id=%s", item.job_id)
         log_event("download_error", target=item.job_id, level="error", metadata={"category": "unexpected"})
         await _safe_edit(bot, item, status, t(item.locale, "temporary_error"), reply_markup=retry_keyboard(item.locale, item.job_id))
+
+
 async def worker_loop(bot: Bot) -> None:
     try:
         await download_queue.run(lambda item: process_download(bot, item))

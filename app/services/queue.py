@@ -26,6 +26,8 @@ class QueueItem:
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     retry_of: str | None = None
     status_message_id: int | None = None
+    request_message_id: int | None = None
+    output_mode: str = "video"
 
 
 class QueueStopped(Exception):

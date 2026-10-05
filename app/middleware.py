@@ -22,7 +22,7 @@ class UserAccessMiddleware(BaseMiddleware):
         message = event.message if isinstance(event, CallbackQuery) else event
         chat = getattr(message, "chat", None)
         text = getattr(message, "text", "") or ""
-        relevant_message = isinstance(event, CallbackQuery) or "http://" in text.lower() or "https://" in text.lower() or text.startswith(("/start", "/settings"))
+        relevant_message = isinstance(event, CallbackQuery) or "http://" in text.lower() or "https://" in text.lower() or text.startswith(("/start", "/settings", "/dl", "/download", "/circle"))
         if user and is_user_blocked(user.id):
             if not relevant_message:
                 return await handler(event, data)

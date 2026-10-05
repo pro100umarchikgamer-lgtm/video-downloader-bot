@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ class StorageService:
     def __init__(self, runtime: RuntimeConfig):
         self.runtime = runtime
         self.alert_service = None
+        self._store_lock = asyncio.Lock()
 
     def seed_legacy_channels(self, channels: dict[str, int]) -> None:
         with get_connection() as conn:
@@ -211,6 +213,83 @@ class StorageService:
             conn.commit()
         if old and not old["healthy"]:
             log_event("storage_recovered", target=str(storage_id))
+
+    async def store_file_id(
+        self,
+        bot: Bot,
+        result: DownloadResult,
+        file_id: str,
+        *,
+        content_id: str,
+        original_url: str,
+    ) -> CacheWriteResult | None:
+        """Copy an already delivered Telegram file into cache without re-uploading disk bytes."""
+        async with self._store_lock:
+            if self.cache_entries(content_id, result.quality):
+                return None
+            tier = self.tier_for_size(result.filesize)
+            storages = self.list_storages(storage_type=tier, enabled_only=True)
+            for index, storage in enumerate(storages):
+                try:
+                    message = await telegram_retry(
+                        lambda storage=storage: bot.send_video(
+                            storage["telegram_chat_id"],
+                            video=file_id,
+                            caption=f"{result.title[:700]}\n{result.quality}p",
+                            supports_streaming=True,
+                        ),
+                        max_attempts=2,
+                    )
+                    stored_file_id = message.video.file_id if message.video else file_id
+                    with get_connection() as conn:
+                        cur = conn.execute(
+                            """INSERT INTO cache_entries
+                               (content_id,quality,source,original_url,title,duration,filesize,
+                                storage_id,telegram_chat_id,telegram_message_id,telegram_file_id)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                               ON CONFLICT(content_id,quality,telegram_file_id) DO UPDATE SET
+                                 storage_id=excluded.storage_id,telegram_chat_id=excluded.telegram_chat_id,
+                                 telegram_message_id=excluded.telegram_message_id,
+                                 duration=excluded.duration,filesize=excluded.filesize,
+                                 last_used=CURRENT_TIMESTAMP""",
+                            (
+                                content_id, result.quality, result.source, original_url, result.title,
+                                result.duration, result.filesize, storage["id"], storage["telegram_chat_id"],
+                                message.message_id, stored_file_id,
+                            ),
+                        )
+                        conn.commit()
+                        entry = conn.execute(
+                            "SELECT id FROM cache_entries WHERE content_id=? AND quality=? AND telegram_file_id=?",
+                            (content_id, result.quality, stored_file_id),
+                        ).fetchone()
+                    self.mark_storage_success(storage["id"])
+                    if index > 0:
+                        log_event(
+                            "storage_failover",
+                            target=str(storage["id"]),
+                            level="warning",
+                            metadata={"tier": tier},
+                        )
+                    return CacheWriteResult(
+                        stored_file_id,
+                        int(entry["id"] if entry else cur.lastrowid),
+                        storage["id"],
+                    )
+                except Exception as exc:
+                    logger.warning("Cache storage file_id copy failed storage_id=%s: %s", storage["id"], exc)
+                    self.mark_storage_error(storage["id"], exc)
+                    if self.alert_service is not None:
+                        await self.alert_service.notify(
+                            f"storage:{storage['id']}",
+                            f"Хранилище #{storage['id']} недоступно; включён failover.",
+                        )
+            if storages and self.alert_service is not None:
+                await self.alert_service.notify(
+                    f"storage-all:{tier}",
+                    f"Все хранилища уровня {tier.upper()} недоступны. Пользователь уже получил видео.",
+                )
+            return None
 
     async def store(
         self,

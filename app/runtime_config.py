@@ -46,8 +46,8 @@ class RuntimeConfig:
         integer = int
         number = float
         self.specs: dict[str, SettingSpec] = {
-            "private_default_quality": SettingSpec("private_default_quality", initial("DEFAULT_QUALITY", "auto"), _quality, lambda v: v in QUALITIES, "Качество в ЛС"),
-            "group_default_quality": SettingSpec("group_default_quality", initial("GROUP_DEFAULT_QUALITY", "auto"), _quality, lambda v: v in QUALITIES, "Качество в группах"),
+            "private_default_quality": SettingSpec("private_default_quality", initial("DEFAULT_QUALITY", "1080"), _quality, lambda v: v in QUALITIES, "Качество в ЛС"),
+            "group_default_quality": SettingSpec("group_default_quality", initial("GROUP_DEFAULT_QUALITY", "1080"), _quality, lambda v: v in QUALITIES, "Качество в группах"),
             "max_concurrent_downloads": SettingSpec("max_concurrent_downloads", initial("MAX_CONCURRENT_DOWNLOADS", "2"), integer, lambda v: 1 <= v <= 64, "Параллельные загрузки", True),
             "queue_workers": SettingSpec("queue_workers", initial("QUEUE_WORKERS", "2"), integer, lambda v: 1 <= v <= 64, "Воркеры очереди", True),
             "max_batch_size": SettingSpec("max_batch_size", initial("MAX_BATCH_SIZE", "6"), integer, lambda v: 1 <= v <= 20, "Ссылок в сообщении"),
